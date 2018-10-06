@@ -43,6 +43,9 @@ end
 
 macro lockdata(ctx, expr)
     esc(quote
+        if islocked($ctx.datalock)
+            println("tls lock wait...")
+        end
         lock($ctx.datalock)
         @assert $ctx.datalock.reentrancy_cnt == 1
         try
