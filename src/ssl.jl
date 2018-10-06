@@ -193,6 +193,7 @@ function handshake(ctx::SSLContext)
             try
                 wait(ctx.bio.readnotify)
             catch e
+                println("**e in wait(ctx.bio.readnotify) $e")
                 if e isa Base.UVError
                     # Ignore read errors (UVError ECONNRESET)
                     # https://github.com/JuliaWeb/MbedTLS.jl/issues/148
@@ -266,11 +267,13 @@ function Base.unsafe_read(ctx::SSLContext, buf::Ptr{UInt8}, nbytes::UInt; err=tr
                    ctx.data, buf + nread, nbytes - nread)
         end
         if n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || n == 0
+            println("**sslclose in unsafe_read")
             close(ctx)
             err ? throw(EOFError()) : return nread
         elseif n == MBEDTLS_ERR_SSL_WANT_READ
             wait(ctx)
         elseif n < 0
+            println("**mbed_err in unsafe_read $n")
             mbed_err(n)
         else
             nread += n
@@ -298,6 +301,7 @@ end
 
 function Base.close(ctx::SSLContext)
     @lockdata ctx begin
+        println("**sslclose in close**")
         if isopen(ctx.bio)
             try
                 # This is ugly, but a harmless broken pipe exception will be
@@ -335,11 +339,12 @@ function decrypt_available_bytes(ctx::SSLContext)
                  ctx.data,     C_NULL,       0)
     end
     if n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY
-        println("**sslclose**")
+        println("**sslclose in decrypt_available_bytes**")
         close(ctx)
     elseif n == MBEDTLS_ERR_SSL_WANT_READ
         # ignore
     elseif n < 0
+            println("**mbed_err in decrypt_available_bytes$n")
         mbed_err(n)
     end
 end
