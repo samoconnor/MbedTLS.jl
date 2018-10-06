@@ -118,8 +118,8 @@ function f_send(c_ctx, c_msg, sz)
 end
 
 function f_recv(c_ctx, c_msg, sz)
+    @assert sz > 0
     jl_ctx = unsafe_pointer_to_objref(c_ctx)
-@show typeof(jl_ctx)
     n = bytesavailable(jl_ctx)
     if n == 0
         return Cint(MBEDTLS_ERR_SSL_WANT_READ)
