@@ -356,13 +356,13 @@ function decrypt_available_bytes(ctx::SSLContext)
         println("**sslclose in decrypt_available_bytes**")
         close(ctx)
     elseif n == MBEDTLS_ERR_SSL_WANT_READ
-        println("**want read in decrypt_available_bytes**")
+        #println("**want read in decrypt_available_bytes**")
         # ignore
     elseif n < 0
             println("**mbed_err in decrypt_available_bytes$n")
         mbed_err(n)
     elseif n == 0
-            println("**zero return in decrypt_available_bytes$n")
+            #println("**zero return in decrypt_available_bytes$n")
     end
 end
 
