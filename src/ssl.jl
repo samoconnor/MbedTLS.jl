@@ -275,6 +275,8 @@ function Base.unsafe_read(ctx::SSLContext, buf::Ptr{UInt8}, nbytes::UInt; err=tr
         elseif n < 0
             println("**mbed_err in unsafe_read $n")
             mbed_err(n)
+        elseif n == 0
+                println("**zero return in unafe_read$n")
         else
             nread += n
         end
@@ -300,9 +302,11 @@ function Base.eof(ctx::SSLContext)
 
     pending = Int(ccall((:mbedtls_ssl_check_pending, libmbedtls),
                          Csize_t, (Ptr{Void},), ctx.data))
-    @show pending
+    if pending
+        @show pending
 
-    @show _bytesavailable(ctx)
+        @show _bytesavailable(ctx)
+    end
 
     decrypt_available_bytes(ctx)
 
@@ -357,6 +361,8 @@ function decrypt_available_bytes(ctx::SSLContext)
     elseif n < 0
             println("**mbed_err in decrypt_available_bytes$n")
         mbed_err(n)
+    elseif n == 0
+            println("**zero return in decrypt_available_bytes$n")
     end
 end
 
