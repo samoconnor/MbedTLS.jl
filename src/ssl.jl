@@ -35,8 +35,10 @@ mutable struct SSLContext <: IO
         ctx.datalock = ReentrantLock()
         ccall((:mbedtls_ssl_init, libmbedtls), Cvoid, (Ptr{Cvoid},), ctx.data)
         @compat finalizer(ctx->begin
+            dbg!(ctx.conf, no_tls_dbg)
             ccall((:mbedtls_ssl_free, libmbedtls), Cvoid, (Ptr{Cvoid},), ctx.data)
             Libc.free(ctx.data)
+            dbg!(ctx.conf, ctx.conf.dbg)
         end, ctx)
         ctx
     end
