@@ -333,13 +333,15 @@ function decrypt_available_bytes(ctx::SSLContext)
               (Ptr{Cvoid}, Ptr{Cvoid}, Csize_t),
                  ctx.data,     C_NULL,       0)
     end
-    @show n
     if n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY
+        println("**sslclose**")
         close(ctx)
     elseif n == MBEDTLS_ERR_SSL_WANT_READ
         # ignore
     elseif n < 0
         mbed_err(n)
+    else
+        @show n
     end
 end
 
