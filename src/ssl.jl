@@ -15,6 +15,7 @@ mutable struct SSLConfig
             set_dbg_level(0)
             ccall((:mbedtls_ssl_config_free, libmbedtls), Cvoid, (Ptr{Cvoid},), conf.data)
             Libc.free(conf.data)
+            set_dbg_level(db_level)
         end, conf)
         conf
     end
@@ -38,6 +39,7 @@ mutable struct SSLContext <: IO
             set_dbg_level(0)
             ccall((:mbedtls_ssl_free, libmbedtls), Cvoid, (Ptr{Cvoid},), ctx.data)
             Libc.free(ctx.data)
+            set_dbg_level(db_level)
         end, ctx)
         ctx
     end
@@ -157,7 +159,10 @@ end
     INFO,
     VERBOSE)
 
+db_level = 0
+
 function set_dbg_level(level)
+    global db_level = level
     ccall((:mbedtls_debug_set_threshold, libmbedtls), Cvoid,
         (Cint,), Cint(level))
     nothing
