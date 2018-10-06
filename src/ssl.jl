@@ -296,6 +296,16 @@ Base.readavailable(ctx::SSLContext) = read(ctx, bytesavailable(ctx))
 
 function Base.eof(ctx::SSLContext)
     bytesavailable(ctx)>0 && return false
+
+
+    pending = Int(ccall((:mbedtls_ssl_check_pending, libmbedtls),
+                         Csize_t, (Ptr{Void},), ctx.data))
+    @show pending
+
+    @show _bytesavailable(ctx)
+
+    decrypt_available_bytes(ctx)
+
     return eof(ctx.bio) && bytesavailable(ctx) == 0
 end
 
@@ -342,6 +352,7 @@ function decrypt_available_bytes(ctx::SSLContext)
         println("**sslclose in decrypt_available_bytes**")
         close(ctx)
     elseif n == MBEDTLS_ERR_SSL_WANT_READ
+        println("**want read in decrypt_available_bytes**")
         # ignore
     elseif n < 0
             println("**mbed_err in decrypt_available_bytes$n")
