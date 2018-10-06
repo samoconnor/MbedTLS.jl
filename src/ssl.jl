@@ -119,6 +119,7 @@ end
 
 function f_recv(c_ctx, c_msg, sz)
     jl_ctx = unsafe_pointer_to_objref(c_ctx)
+@show typeof(jl_ctx)
     n = bytesavailable(jl_ctx)
     if n == 0
         return Cint(MBEDTLS_ERR_SSL_WANT_READ)
@@ -340,8 +341,6 @@ function decrypt_available_bytes(ctx::SSLContext)
         # ignore
     elseif n < 0
         mbed_err(n)
-    else
-        @show n
     end
 end
 
