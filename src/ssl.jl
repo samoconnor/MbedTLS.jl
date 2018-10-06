@@ -12,9 +12,10 @@ mutable struct SSLConfig
         conf.data = Libc.malloc(1000)  # 360
         ccall((:mbedtls_ssl_config_init, libmbedtls), Cvoid, (Ptr{Cvoid},), conf.data)
         @compat finalizer(conf->begin
-            dbg!(conf, no_tls_dbg)
+            set_dbg_level(0)
             ccall((:mbedtls_ssl_config_free, libmbedtls), Cvoid, (Ptr{Cvoid},), conf.data)
             Libc.free(conf.data)
+            set_dbg_level(2)
         end, conf)
         conf
     end
@@ -35,10 +36,10 @@ mutable struct SSLContext <: IO
         ctx.datalock = ReentrantLock()
         ccall((:mbedtls_ssl_init, libmbedtls), Cvoid, (Ptr{Cvoid},), ctx.data)
         @compat finalizer(ctx->begin
-            dbg!(ctx.config, no_tls_dbg)
+            set_dbg_level(0)
             ccall((:mbedtls_ssl_free, libmbedtls), Cvoid, (Ptr{Cvoid},), ctx.data)
             Libc.free(ctx.data)
-            dbg!(ctx.config, ctx.config.dbg)
+            set_dbg_level(2)
         end, ctx)
         ctx
     end
