@@ -303,9 +303,10 @@ function Base.eof(ctx::SSLContext)
     pending = Int(ccall((:mbedtls_ssl_check_pending, libmbedtls),
                          Csize_t, (Ptr{Void},), ctx.data))
     if pending > 0
+        println("****************************************************")
         @show pending
-
         @show _bytesavailable(ctx)
+        println("****************************************************")
     end
 
     decrypt_available_bytes(ctx)
