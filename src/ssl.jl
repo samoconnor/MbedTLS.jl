@@ -127,24 +127,26 @@ end
 
 function f_send(c_ctx, c_msg, sz)
     jl_ctx = unsafe_pointer_to_objref(c_ctx)
-    return Cint(unsafe_write(jl_ctx, c_msg, sz))
+    return Cint(unsafe_write(jl_ctx.bio, c_msg, sz))
 end
 
 function f_recv(c_ctx, c_msg, sz)
     @assert sz > 0
     jl_ctx = unsafe_pointer_to_objref(c_ctx)
-    n = bytesavailable(jl_ctx)
+    n = bytesavailable(jl_ctx.bio)
     if n == 0
-        return Cint(MBEDTLS_ERR_SSL_WANT_READ)
+        return isopen(jl_ctx.bio) ? Cint(MBEDTLS_ERR_SSL_WANT_READ) :
+        !jl_ctx.close_notify_sent ? Cint(MBEDTLS_ERR_NET_CONN_RESET) :
+                                    Cint(0)
     end
     n = min(sz, n)
-    unsafe_read(jl_ctx, c_msg, n)
+    unsafe_read(jl_ctx.bio, c_msg, n)
     return Cint(n)
 end
 
 function set_bio!(ssl_ctx::SSLContext, jl_ctx::T) where {T<:IO}
     ssl_ctx.bio = jl_ctx
-    set_bio!(ssl_ctx, pointer_from_objref(ssl_ctx.bio), c_send[], c_recv[])
+    set_bio!(ssl_ctx, pointer_from_objref(ssl_ctx), c_send[], c_recv[])
     nothing
 end
 
@@ -197,7 +199,9 @@ function handshake(ctx::SSLContext)
             break
         end
         if n == MBEDTLS_ERR_SSL_WANT_READ
-            eof(ctx.bio)
+            if eof(ctx.bio)
+                throw(EOFError())
+            end
         else
             mbed_err(n)
         end
@@ -216,8 +220,6 @@ end
 
 
 # Connection Monitoring
-
-Base.wait(ctx::SSLContext) = wait(ctx.decrypted_data_ready)
 
 notify_error(ctx::SSLContext, e) = notify(ctx.decrypted_data_ready, e;
                                           all=true, error=true)
@@ -246,14 +248,14 @@ function monitor(ctx::SSLContext)
     try
         while ctx.isopen
 
-            n = ssl_get_bytes_avail(ctx)                                         #; println("ssl_get_bytes_avail(ctx) = $n")
+            n = ssl_get_bytes_avail(ctx)
             if n > 0
-                notify(ctx.decrypted_data_ready, n)                              #; println("notify(ctx.decrypted_data_ready)")
+                notify(ctx.decrypted_data_ready, n)
                 yield()
             end
 
             if (n == 0 && ssl_check_pending(ctx)) || !eof(ctx.bio)
-                n = ssl_read(ctx, C_NULL, 0)                                     #; println("ssl_read(ctx, NULL, 0) = $n $(n == MBEDTLS_ERR_SSL_WANT_READ ? "WANT_READ" : "")")
+                n = ssl_read(ctx, C_NULL, 0)
                 if n == MBEDTLS_ERR_SSL_WANT_READ || n >= 0
                     continue
                     #FIXME do we spin fast if the TLS buffer fills up?
@@ -267,7 +269,7 @@ function monitor(ctx::SSLContext)
                 break
             end
 
-            if !isopen(ctx.bio);                                                 #; @show isopen(ctx.bio)
+            if !isopen(ctx.bio);
                 if !ctx.close_notify_sent
                     notify_error(ctx, EOFError())
                 end
@@ -278,7 +280,7 @@ function monitor(ctx::SSLContext)
         ctx.isopen = false
         notify_error(ctx, e)
     finally
-        close(ctx.bio)                                                           #; println("monitor done!")
+        close(ctx.bio)
     end
 end
 
@@ -298,7 +300,8 @@ function alpn_proto(ctx::SSLContext)
     unsafe_string(rv)
 end
 
-import Base: unsafe_read, unsafe_write
+
+# IO Interface
 
 function Base.unsafe_write(ctx::SSLContext, msg::Ptr{UInt8}, N::UInt)
     nw = 0
@@ -311,9 +314,6 @@ function Base.unsafe_write(ctx::SSLContext, msg::Ptr{UInt8}, N::UInt)
     return Int(nw)
 end
 
-
-# IO Interface
-
 Base.write(ctx::SSLContext, msg::UInt8) = write(ctx, Ref(msg))
 
 function Base.unsafe_read(ctx::SSLContext, buf::Ptr{UInt8}, nbytes::UInt; err=true)
@@ -325,18 +325,16 @@ function Base.unsafe_read(ctx::SSLContext, buf::Ptr{UInt8}, nbytes::UInt; err=tr
         catch e
             ctx.isopen = false
             rethrow(e)
-        end                                                                      #; println("ssl_read(ctx, buf, $(nbytes - nread)) = $n $(n == MBEDTLS_ERR_SSL_WANT_READ ? "WANT_READ" : "")")
+        end
 
-        if n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || n == 0                      #; println("**sslclose in unsafe_read")
+        if n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || n == 0
             ctx.isopen = false
             err ? throw(EOFError()) : return nread
         elseif n == MBEDTLS_ERR_SSL_WANT_READ
             wait(ctx.decrypted_data_ready)
         elseif n < 0
-            ctx.isopen = false                                                   #; println("**mbed_err in unsafe_read $n")
+            ctx.isopen = false
             mbed_err(n)
-        elseif n == 0
-                                                                                 #; println("**zero return in unafe_read")
         else
             nread += n
         end
@@ -357,20 +355,29 @@ end
 Base.readavailable(ctx::SSLContext) = read(ctx, bytesavailable(ctx))
 
 function Base.eof(ctx::SSLContext)
-    n = ssl_get_bytes_avail(ctx)                                                 #; println("eof(::SSLContext) ... $n")
+    n = ssl_get_bytes_avail(ctx)
     while n == 0
-        if !ctx.isopen                                                           #; println("eof(::SSLContext) -> true")
+        if !ctx.isopen
             return true
         end
-        n = wait(ctx.decrypted_data_ready)                                       #; println("eof(::SSLContext) -> wait done: $n")
-    end                                                                          #; println("eof(::SSLContext) -> false $n")
+        n = wait(ctx.decrypted_data_ready)
+    end
     return false
 end
 
 function Base.close(ctx::SSLContext)
     if !ctx.close_notify_sent && ctx.isopen && isopen(ctx.bio)
         ctx.close_notify_sent = true
-        ssl_close_notify(ctx)
+        # This is ugly, but a harmless broken pipe exception will be
+        # thrown if the peer closes the connection without responding
+        # FIXME need to reproduce this and handle a specific error.
+        # try
+            ssl_close_notify(ctx)
+        # catch e
+        #     if !(e isa XXX) || e.code != YYY
+        #         rethrow(e)
+        #     end
+        #end
     end
     nothing
 end
