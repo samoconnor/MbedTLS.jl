@@ -233,7 +233,7 @@ function pump(ctx::SSLContext)
         end
     catch e
         ctx.isopen = false
-        Base.notify_error(ctx.decrypted_data_ready, e)
+        notify_error(ctx, e)
     finally
         close(ctx.bio)
     end
@@ -305,8 +305,8 @@ function Base.unsafe_read(ctx::SSLContext, buf::Ptr{UInt8}, nbytes::UInt; err=tr
     nread::UInt = 0
     while nread < nbytes
 
-        try
-            n = ssl_read(ctx, buf + nread, nbytes - nread)
+        n = try
+            ssl_read(ctx, buf + nread, nbytes - nread)
         catch e
             ctx.isopen = false
             rethrow(e)
