@@ -173,7 +173,7 @@ end
 Base.wait(ctx::SSLContext) = wait(ctx.readytoread)
 
 wait_for_decrypted_data(ctx::SSLContext) = wait(ctx.readytoread)
-wait_for_encrypted_data(ctx::SSLContext) = (eof(ctx.bio; nothing)
+wait_for_encrypted_data(ctx::SSLContext) = (eof(ctx.bio); nothing)
 
 notify_error(ctx::SSLContext, e) = notify(ctx.readytoread, e, true, true)
 
