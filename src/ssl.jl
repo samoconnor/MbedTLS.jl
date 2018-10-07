@@ -256,7 +256,7 @@ function monitor(ctx::SSLContext)
                 else
                     if n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY
                         ctx.isopen = false
-                        notify(ctx.decrypted_data_ready0)
+                        notify(ctx.decrypted_data_ready)
                     else
                         notify_error(ctx, MbedException(n))
                         break
@@ -272,10 +272,14 @@ function monitor(ctx::SSLContext)
     catch e
         ctx.isopen = false
         notify_error(ctx, e)
+        rethrow(e)
     finally
         close(ctx.bio)
     end
 end
+
+notify_error(ctx::SSLContext, e) = notify(ctx.decrypted_data_ready, e;
+                                          all=true, error=true)
 
 
 # ALPN Configuration
