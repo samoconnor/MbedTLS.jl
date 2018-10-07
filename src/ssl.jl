@@ -48,9 +48,9 @@ end
 
 macro lockdata(ctx, expr)
     esc(quote
-        if islocked($ctx.datalock)
-            println("tls lock wait...")
-        end
+                                                                                 if islocked($ctx.datalock)
+                                                                                    println("tls lock wait...")
+                                                                                 end
         lock($ctx.datalock)
         @assert $ctx.datalock.reentrancy_cnt == 1
         try
@@ -200,18 +200,13 @@ function pump(ctx::SSLContext)
     try
         while ctx.isopen
 
-            @show :top
-            @show ssl_get_bytes_avail(ctx)
-            n = ssl_get_bytes_avail(ctx)
+            n = ssl_get_bytes_avail(ctx)                                         ; println("ssl_get_bytes_avail(ctx) = $n")
             if n > 0
                 notify(ctx.decrypted_data_ready)
             end
 
-            @show ssl_check_pending(ctx)
             if (n == 0 && ssl_check_pending(ctx)) || !eof(ctx.bio)
-                n = ssl_read(ctx, C_NULL, 0)
-                @show n
-                @show n == MBEDTLS_ERR_SSL_WANT_READ
+                n = ssl_read(ctx, C_NULL, 0)                                     ; println("ssl_read(ctx, NULL, 0) = $n $(n == MBEDTLS_ERR_SSL_WANT_READ ? "WANT_READ" : "")")
                 if n == MBEDTLS_ERR_SSL_WANT_READ || n >= 0
                     continue
                     #FIXME do we spin fast if the TLS buffer fills up?
@@ -225,8 +220,7 @@ function pump(ctx::SSLContext)
                 break
             end
 
-            @show isopen(ctx.bio)
-            if !isopen(ctx.bio)
+            if !isopen(ctx.bio);                                                 ; @show isopen(ctx.bio)
                 if !ctx.close_notify_sent
                     notify_error(ctx, EOFError())
                 end
@@ -237,7 +231,7 @@ function pump(ctx::SSLContext)
         ctx.isopen = false
         notify_error(ctx, e)
     finally
-        close(ctx.bio)
+        close(ctx.bio)                                                           ; println("pump done!")
     end
 end
 
@@ -312,20 +306,18 @@ function Base.unsafe_read(ctx::SSLContext, buf::Ptr{UInt8}, nbytes::UInt; err=tr
         catch e
             ctx.isopen = false
             rethrow(e)
-        end
+        end                                                                      ; println("ssl_read(ctx, buf, $(bytes - nread)) = $n $(n == MBEDTLS_ERR_SSL_WANT_READ ? "WANT_READ" : "")")
 
-        if n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || n == 0
-            println("**sslclose in unsafe_read")
+        if n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || n == 0                      ; println("**sslclose in unsafe_read")
             ctx.isopen = false
             err ? throw(EOFError()) : return nread
         elseif n == MBEDTLS_ERR_SSL_WANT_READ
             wait(ctx.decrypted_data_ready)
         elseif n < 0
-            ctx.isopen = false
-            println("**mbed_err in unsafe_read $n")
+            ctx.isopen = false                                                   ; println("**mbed_err in unsafe_read $n")
             mbed_err(n)
         elseif n == 0
-            println("**zero return in unafe_read")
+                                                                                 ; println("**zero return in unafe_read")
         else
             nread += n
         end
