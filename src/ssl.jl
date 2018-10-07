@@ -396,14 +396,14 @@ function ssl_get_bytes_avail(ctx::SSLContext)::Int
     end
 end
 
-function ssl_check_pending(ctx::SSLContext)::Bool =
+function ssl_check_pending(ctx::SSLContext)::Bool
     @lockdata ctx begin
-        return ccall((:mbedtls_ssl_check_pending, libmbedtls)
+        return ccall((:mbedtls_ssl_check_pending, libmbedtls),
                      Cint, (Ptr{Cvoid},), ctx.data) > 0
     end
 end
 
-function ssl_read(ctx::SSLContext, ptr, n)::Int =
+function ssl_read(ctx::SSLContext, ptr, n)::Int
     @lockdata ctx begin
         return ccall((:mbedtls_ssl_read, libmbedtls), Cint,
                      (Ptr{Cvoid}, Ptr{Cvoid}, Csize_t),
