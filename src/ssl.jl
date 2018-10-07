@@ -24,7 +24,7 @@ Base.show(io::IO, c::SSLConfig) = print(io, "MbedTLS.SSLConfig()")
 mutable struct SSLContext <: IO
     data::Ptr{Cvoid}
     datalock::ReentrantLock
-    readytoread::Condition
+    decrypted_data_ready::Condition
     config::SSLConfig
     isopen::Bool
     close_notify_sent::Bool
@@ -34,7 +34,7 @@ mutable struct SSLContext <: IO
         ctx = new()
         ctx.data = Libc.malloc(1000)  # 488
         ctx.datalock = ReentrantLock()
-        ctx.readytoread = Condition()
+        ctx.decrypted_data_ready = Condition()
         ctx.isopen = false
         ctx.close_notify_sent = false
         ccall((:mbedtls_ssl_init, libmbedtls), Cvoid, (Ptr{Cvoid},), ctx.data)
@@ -170,13 +170,11 @@ function set_dbg_level(level)
     nothing
 end
 
-Base.wait(ctx::SSLContext) = wait(ctx.readytoread)
 
-wait_for_decrypted_data(ctx::SSLContext) = wait(ctx.readytoread)
-wait_for_encrypted_data(ctx::SSLContext) = (eof(ctx.bio); nothing)
+Base.wait(ctx::SSLContext) = wait(ctx.decrypted_data_ready)
 
-notify_error(ctx::SSLContext, e) = notify(ctx.readytoread, e, true, true)
-
+notify_error(ctx::SSLContext, e) = notify(ctx.decrypted_data_ready, e;
+                                          all=true, error=true)
 
 
 """
@@ -204,11 +202,11 @@ function pump(ctx::SSLContext)
 
             @show ssl_get_bytes_avail(ctx)
             if ssl_get_bytes_avail(ctx) > 0
-                notify(ctx.readytoread)
+                notify(ctx.decrypted_data_ready)
             end
 
             @show ssl_check_pending(ctx)
-            if ssl_check_pending(ctx)
+            if ssl_check_pending(ctx) || !eof(ctx.bio)
                 n = ssl_read(ctx, C_NULL, 0)
                 @show n
                 @show n == MBEDTLS_ERR_SSL_WANT_READ
@@ -232,14 +230,10 @@ function pump(ctx::SSLContext)
                 end
                 break
             end
-
-            wait_for_encrypted_data(ctx)
-            println("pump woke up!")
-            @show ctx.isopen
         end
     catch e
         ctx.isopen = false
-        Base.notify_error(ctx.readytoread, e)
+        Base.notify_error(ctx.decrypted_data_ready, e)
     finally
         close(ctx.bio)
     end
@@ -258,7 +252,7 @@ function handshake(ctx::SSLContext)
             break
         end
         if n == MBEDTLS_ERR_SSL_WANT_READ
-            wait_for_encrypted_data(ctx)
+            eof(ctx.bio)
         else
             mbed_err(n)
         end
@@ -323,7 +317,7 @@ function Base.unsafe_read(ctx::SSLContext, buf::Ptr{UInt8}, nbytes::UInt; err=tr
             ctx.isopen = false
             err ? throw(EOFError()) : return nread
         elseif n == MBEDTLS_ERR_SSL_WANT_READ
-            wait_for_decrypted_data(ctx)
+            wait(ctx.decrypted_data_ready)
         elseif n < 0
             ctx.isopen = false
             println("**mbed_err in unsafe_read $n")
@@ -354,7 +348,7 @@ function Base.eof(ctx::SSLContext)
         if !ctx.isopen
             return true
         end
-        wait_for_decrypted_data(ctx)
+        wait(ctx.decrypted_data_ready)
     end
     return false
 end
