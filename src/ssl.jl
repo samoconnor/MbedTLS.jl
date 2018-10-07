@@ -261,6 +261,7 @@ function monitor(ctx::SSLContext)
                     #FIXME do we spin fast if the TLS buffer fills up?
                 elseif !ctx.close_notify_sent
                     if n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY
+                        println("EOFError in monitor, MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY")
                         notify_error(ctx, EOFError())
                     else
                         notify_error(ctx, MbedException(n))
@@ -271,6 +272,7 @@ function monitor(ctx::SSLContext)
 
             if !isopen(ctx.bio);
                 if !ctx.close_notify_sent
+                    println("EOFError in monitor, ctx.bio closed")
                     notify_error(ctx, EOFError())
                 end
                 break
@@ -329,6 +331,7 @@ function Base.unsafe_read(ctx::SSLContext, buf::Ptr{UInt8}, nbytes::UInt; err=tr
 
         if n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || n == 0
             ctx.isopen = false
+            err && println("EOFError in unsafe_read MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY")
             err ? throw(EOFError()) : return nread
         elseif n == MBEDTLS_ERR_SSL_WANT_READ
             wait(ctx.decrypted_data_ready)
