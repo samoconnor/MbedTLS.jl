@@ -216,7 +216,7 @@ function pump(ctx::SSLContext)
 
             n = ssl_get_bytes_avail(ctx)                                         ; println("ssl_get_bytes_avail(ctx) = $n")
             if n > 0
-                notify(ctx.decrypted_data_ready)
+                notify(ctx.decrypted_data_ready)                                 ; println("notify(ctx.decrypted_data_ready)")
             end
 
             if (n == 0 && ssl_check_pending(ctx)) || !eof(ctx.bio)
@@ -352,7 +352,7 @@ function Base.eof(ctx::SSLContext)                                              
         if !ctx.isopen                                                           ; println("eof(::SSLContext) -> true")
             return true
         end
-        wait(ctx.decrypted_data_ready)
+        wait(ctx.decrypted_data_ready)                                           ; println("eof(::SSLContext) -> wait done: $(ssl_get_bytes_avail(ctx))")
     end                                                                          ; println("eof(::SSLContext) -> false $(ssl_get_bytes_avail(ctx))")
     return false
 end
