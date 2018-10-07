@@ -202,12 +202,16 @@ function pump(ctx::SSLContext)
     try
         while ctx.isopen
 
+            @show ssl_get_bytes_avail(ctx)
             if ssl_get_bytes_avail(ctx) > 0
                 notify(ctx.readytoread)
             end
 
+            @show ssl_check_pending(ctx)
             if ssl_check_pending(ctx)
                 n = ssl_read(ctx, C_NULL, 0)
+                @show n
+                @show n == MBEDTLS_ERR_SSL_WANT_READ
                 if n == MBEDTLS_ERR_SSL_WANT_READ || n >= 0
                     continue
                     #FIXME do we spin fast if the TLS buffer fills up?
@@ -221,6 +225,7 @@ function pump(ctx::SSLContext)
                 break
             end
 
+            @show isopen(ctx.bio)
             if !isopen(ctx.bio)
                 if !ctx.close_notify_sent
                     notify_error(ctx, EOFError())
@@ -231,7 +236,6 @@ function pump(ctx::SSLContext)
             wait_for_encrypted_data(ctx)
             println("pump woke up!")
             @show ctx.isopen
-            @show ssl_get_bytes_avail(ctx)
         end
     catch e
         ctx.isopen = false
