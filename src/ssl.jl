@@ -283,11 +283,7 @@ import Base: unsafe_read, unsafe_write
 function Base.unsafe_write(ctx::SSLContext, msg::Ptr{UInt8}, N::UInt)
     nw = 0
     while nw < N
-        ret = @lockdata ctx begin
-            ccall((:mbedtls_ssl_write, libmbedtls), Cint,
-                  (Ptr{Cvoid}, Ptr{Cvoid}, Csize_t),
-                  ctx.data, msg, N - nw)
-        end
+        ret = ssl_write(ctx, msg, N - nw)
         ret < 0 && mbed_err(ret)
         nw += ret
         msg += ret
@@ -306,7 +302,7 @@ function Base.unsafe_read(ctx::SSLContext, buf::Ptr{UInt8}, nbytes::UInt; err=tr
         catch e
             ctx.isopen = false
             rethrow(e)
-        end                                                                      ; println("ssl_read(ctx, buf, $(bytes - nread)) = $n $(n == MBEDTLS_ERR_SSL_WANT_READ ? "WANT_READ" : "")")
+        end                                                                      ; println("ssl_read(ctx, buf, $(nbytes - nread)) = $n $(n == MBEDTLS_ERR_SSL_WANT_READ ? "WANT_READ" : "")")
 
         if n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || n == 0                      ; println("**sslclose in unsafe_read")
             ctx.isopen = false
@@ -398,6 +394,14 @@ end
 function ssl_read(ctx::SSLContext, ptr, n)::Int
     @lockdata ctx begin
         return ccall((:mbedtls_ssl_read, libmbedtls), Cint,
+                     (Ptr{Cvoid}, Ptr{Cvoid}, Csize_t),
+                     ctx.data, ptr, n)
+    end
+end
+
+function ssl_write(ctx::SSLContext, ptr, n)::Int
+    @lockdata ctx begin
+        return ccall((:mbedtls_ssl_write, libmbedtls), Cint,
                      (Ptr{Cvoid}, Ptr{Cvoid}, Csize_t),
                      ctx.data, ptr, n)
     end
