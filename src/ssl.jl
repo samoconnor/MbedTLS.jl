@@ -29,6 +29,7 @@ mutable struct SSLContext <: IO
     config::SSLConfig
     isopen::Bool
     close_notify_sent::Bool
+    decrypted_data_wanted::Condition
     decrypted_data_ready::Condition
     bio
 
@@ -38,6 +39,7 @@ mutable struct SSLContext <: IO
         ctx.datalock = ReentrantLock()
         ctx.isopen = false
         ctx.close_notify_sent = false
+        ctx.decrypted_data_wanted = Condition()
         ctx.decrypted_data_ready = Condition()
         ccall((:mbedtls_ssl_init, libmbedtls), Cvoid, (Ptr{Cvoid},), ctx.data)
         @compat finalizer(ctx->begin
@@ -120,10 +122,29 @@ function set_bio!(ssl_ctx::SSLContext, ctx, f_send::Ptr{Cvoid}, f_recv::Ptr{Cvoi
 end
 
 
+# Debug
+
+using Dates
+
+if DEBUG_LEVEL > 0
+    taskid(t=current_task()) = string(hash(t) & 0xffff, base=16, pad=4)
+    debug_header() = string("MBTLS: ", rpad(Dates.now(), 24), taskid(), " ")
+end
+
+macro debug(n::Int, s)
+    DEBUG_LEVEL >= n ? :(println(debug_header(), $(esc(s)))) :
+                       :()
+end
+
+macro 💀(s) :( @debug 1 $(esc(s)) ) end
+macro 😬(s) :( @debug 2 $(esc(s)) ) end
+macro 🤖(s) :( @debug 3 $(esc(s)) ) end
+
+
 # Low level Encrypted IO Callbacks
 
 function f_send(c_ctx, c_msg, sz)
-    jl_ctx = unsafe_pointer_to_objref(c_ctx)
+    jl_ctx = unsafe_pointer_to_objref(c_ctx)                                    ;@🤖 "f_send ➡️  $sz"
     return Cint(unsafe_write(jl_ctx.bio, c_msg, sz))
 end
 
@@ -136,7 +157,7 @@ function f_recv(c_ctx, c_msg, sz)
         !jl_ctx.close_notify_sent ? Cint(MBEDTLS_ERR_NET_CONN_RESET) :
                                     Cint(0)
     end
-    n = min(sz, n)
+    n = min(sz, n)                                                              ;@🤖 "f_recv ⬅️  $n"
     unsafe_read(jl_ctx.bio, c_msg, n)
     return Cint(n)
 end
@@ -186,7 +207,7 @@ end
 function handshake(ctx::SSLContext)
 
     ctx.isopen && throw(ArgumentError("handshake() already done!"))
-
+                                                                                ;@😬 "🤝 ..."
     while true
         n = @lockdata ctx begin
             ccall((:mbedtls_ssl_handshake, libmbedtls), Cint,
@@ -195,15 +216,15 @@ function handshake(ctx::SSLContext)
         if n == 0
             break
         end
-        if n == MBEDTLS_ERR_SSL_WANT_READ
+        if n == MBEDTLS_ERR_SSL_WANT_READ                                       ;@😬 "🤝  ⌛️"
             if eof(ctx.bio)
-                throw(EOFError())
+                throw(EOFError())                                               ;@💀 "🤝  💥"
             end
         else
             mbed_err(n)
         end
     end
-
+                                                                                ;@😬 "🤝  ✅"
     ctx.isopen = true
 
     @static if VERSION < v"0.7.0-alpha.0"
@@ -242,39 +263,42 @@ function monitor(ctx::SSLContext)
     try
         while ctx.isopen
 
-            n = ssl_get_bytes_avail(ctx)
-            if n > 0
-                notify(ctx.decrypted_data_ready)
+            n_decrypted = ssl_get_bytes_avail(ctx)                              ;@🤖 "mon 📥  $n_decrypted"
+            if n_decrypted > 0
+                notify(ctx.decrypted_data_ready);                               ;@🤖 "mon 🗣"
                 yield()
             end
 
-            if (n == 0 && ssl_check_pending(ctx)) || !eof(ctx.bio)
+            if (n_decrypted == 0 && ssl_check_pending(ctx)) ||  (                @🤖 "mon ⌛️";
+                                             !eof(ctx.bio))                     ;@🤖 "mon 👁"
                 n = ssl_read(ctx, C_NULL, 0)
-                if n == MBEDTLS_ERR_SSL_WANT_READ || n >= 0
-                    continue
-                    #FIXME do we spin fast if the TLS buffer fills up?
+                if n == MBEDTLS_ERR_SSL_WANT_READ ||
+                   ssl_get_bytes_avail(ctx) > n_decrypted
+                    continue                                                    ;@🤖 "mon 🔄"
+                elseif n == 0 && n_decrypted > 0                                ;@🤖 "mon 🔔"
+                    notify(ctx.decrypted_data_ready)                            ;@🤖 "mon 💤"
+                    wait(ctx.decrypted_data_wanted)
                 else
+                    ctx.isopen = false
                     if n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY
-                        ctx.isopen = false
-                        notify(ctx.decrypted_data_ready)
+                        notify(ctx.decrypted_data_ready)                        ;@🤖 "mon 🗣  🛑"
                     else
-                        notify_error(ctx, MbedException(n))
-                        break
+                        notify_error(ctx, MbedException(n))                     ;@🤖 "mon 🗣  💥"
                     end
                 end
             end
 
             if !isopen(ctx.bio);
-                ctx.isopen = false
+                ctx.isopen = false                                              ;@🤖 "mon 🗣  🗑"
                 notify(ctx.decrypted_data_ready)
             end
         end
     catch e
-        ctx.isopen = false
+        ctx.isopen = false                                                      ;@🤖 "mon 💥  $e"
         notify_error(ctx, e)
         rethrow(e)
     finally
-        close(ctx.bio)
+        close(ctx.bio)                                                          ;@🤖 "mon 🗑"
     end
 end
 
@@ -301,7 +325,7 @@ end
 # IO Interface
 
 function Base.unsafe_write(ctx::SSLContext, msg::Ptr{UInt8}, N::UInt)
-    nw = 0
+    nw = 0                                                                      ;@🤖 "ssl_write ➡️  $N"
     while nw < N
         ret = ssl_write(ctx, msg, N - nw)
         ret < 0 && mbed_err(ret)
@@ -313,63 +337,79 @@ end
 
 Base.write(ctx::SSLContext, msg::UInt8) = write(ctx, Ref(msg))
 
-function Base.unsafe_read(ctx::SSLContext, buf::Ptr{UInt8}, nbytes::UInt; err=true)
+Base.unsafe_read(ctx::SSLContext, buf::Ptr{UInt8}, nbytes::UInt) =
+    (ssl_unsafe_read(ctx, buf, nbytes); nothing)
+
+function ssl_unsafe_read(ctx::SSLContext, buf::Ptr{UInt8}, nbytes::UInt;
+                         error_on_close::Bool=true, wait_for_nbytes::Bool=true)
     nread::UInt = 0
-    while nread < nbytes
+    try
+        while nread < nbytes
 
-        n = try
-            ssl_read(ctx, buf + nread, nbytes - nread)
-        catch e
-            ctx.isopen = false
-            rethrow(e)
-        end
+            n = ssl_read(ctx, buf + nread, nbytes - nread)                      ;@😬 "ssl_read ⬅️  $n"
 
-        if n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || n == 0
-            ctx.isopen = false
-            err && println("EOFError in unsafe_read MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY")
-            err ? throw(EOFError()) : return nread
-        elseif n == MBEDTLS_ERR_SSL_WANT_READ
-            wait(ctx.decrypted_data_ready)
-        elseif n < 0
-            ctx.isopen = false
-            mbed_err(n)
-        else
-            nread += n
+            if n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || n == 0
+                ctx.isopen = false                                              ;@😬 "ssl_read 🛑"
+                if error_on_close
+                    throw(EOFError())
+                else
+                    break
+                end
+            elseif n == MBEDTLS_ERR_SSL_WANT_READ
+                if wait_for_nbytes;                                             ;@🤖 "ssl_read 🗣"
+                    notify(ctx.decrypted_data_wanted)                           ;@😬 "ssl_read ⌛️"
+                    wait(ctx.decrypted_data_ready)
+                else
+                    break
+                end
+            elseif n < 0
+                mbed_err(n)
+            else
+                nread += n
+            end
         end
+    catch e
+        ctx.isopen = false                                                      ;@💀 "ssl_read 💥"
+        rethrow(e)
     end
+    return nread
 end
 
-Base.readbytes!(ctx::SSLContext, buf::Vector{UInt8}, nbytes=length(buf)) = readbytes!(ctx, buf, UInt(nbytes))
-function Base.readbytes!(ctx::SSLContext, buf::Vector{UInt8}, nbytes::UInt)
-    nr = unsafe_read(ctx, pointer(buf), nbytes; err=false)
-    if nr !== nothing
-        resize!(buf, nr::UInt)
-    else
-        nr = nbytes
-    end
+Base.readbytes!(ctx::SSLContext, buf::Vector{UInt8}, nbytes=length(buf); kw...) = readbytes!(ctx, buf, UInt(nbytes); kw...)
+
+function Base.readbytes!(ctx::SSLContext, buf::Vector{UInt8}, nbytes::UInt; all::Bool=true)
+    nr = ssl_unsafe_read(ctx, pointer(buf), nbytes; error_on_close=false,
+                                                    wait_for_nbytes=all)        ;@😬 "readbytes! ⬅️  $nr"
     return Int(nr::UInt)
 end
 
-Base.readavailable(ctx::SSLContext) = read(ctx, bytesavailable(ctx))
+function Base.readavailable(ctx::SSLContext)
+    buf = Vector{UInt8}(undef, MBEDTLS_SSL_MAX_CONTENT_LEN)
+    nr = ssl_unsafe_read(ctx, pointer(buf), UInt(MBEDTLS_SSL_MAX_CONTENT_LEN);
+                         error_on_close=false, wait_for_nbytes=false)           ;@😬 "readavailable ⬅️  $nr"
+    return resize!(buf, nr)
+end
 
 function Base.eof(ctx::SSLContext)
-    while ssl_get_bytes_avail(ctx) == 0
-        if !ctx.isopen
+    while (n = ssl_get_bytes_avail(ctx) == 0)                                   ;@🤖 "eof $n  📥"
+        if !ctx.isopen                                                          ;@💀 "eof true"
             return true
-        end
+        end                                                                     ;@🤖 "eof 🗣"
+        notify(ctx.decrypted_data_wanted)                                       ;@😬 "eof ⌛️"
         wait(ctx.decrypted_data_ready)
-    end
+    end                                                                         ;@😬 "eof false"
     return false
 end
 
-function Base.close(ctx::SSLContext)
+function Base.close(ctx::SSLContext)                                            ;@💀 "close isopen=$(ctx.isopen), " *
+                                                                                               "$(isopen(ctx.bio))"
     if !ctx.close_notify_sent && ctx.isopen && isopen(ctx.bio)
         ctx.close_notify_sent = true
         # This is ugly, but a harmless broken pipe exception will be
         # thrown if the peer closes the connection without responding
         # FIXME need to reproduce this and handle a specific error.
         # try
-            ssl_close_notify(ctx)
+            ssl_close_notify(ctx)                                               ;@💀 "close 🗣"
         # catch e
         #     if !(e isa XXX) || e.code != YYY
         #         rethrow(e)
