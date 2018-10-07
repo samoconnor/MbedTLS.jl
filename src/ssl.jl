@@ -24,14 +24,19 @@ Base.show(io::IO, c::SSLConfig) = print(io, "MbedTLS.SSLConfig()")
 mutable struct SSLContext <: IO
     data::Ptr{Cvoid}
     datalock::ReentrantLock
+    readytoread::Condition
     config::SSLConfig
     isopen::Bool
+    close_notify_sent::Bool
     bio
 
     function SSLContext()
         ctx = new()
         ctx.data = Libc.malloc(1000)  # 488
         ctx.datalock = ReentrantLock()
+        ctx.readytoread = Condition()
+        ctx.isopen = false
+        ctx.close_notify_sent = false
         ccall((:mbedtls_ssl_init, libmbedtls), Cvoid, (Ptr{Cvoid},), ctx.data)
         @compat finalizer(ctx->begin
             ccall((:mbedtls_ssl_free, libmbedtls), Cvoid, (Ptr{Cvoid},), ctx.data)
@@ -165,10 +170,81 @@ function set_dbg_level(level)
     nothing
 end
 
-Base.wait(ctx::SSLContext) = (eof(ctx.bio); nothing)
-                             # eof blocks if the receive buffer is empty
+Base.wait(ctx::SSLContext) = wait(ctx.readytoread)
+
+wait_for_decrypted_data(ctx::SSLContext) = wait(ctx.readytoread)
+wait_for_encrypted_data(ctx::SSLContext) = (eof(ctx.bio; nothing)
+
+notify_error(ctx::SSLContext, e) = notify(ctx.readytoread, e, true, true)
+
+
+
+"""
+    pump(::SSLContext)
+
+For as long as the SSLContext is open:
+ - Notify readers when decrypted data is available.
+ - Check the TLS buffers for encrypted data that needs to be processed.
+   (zero-byte ssl_read(), see https://esp32.com/viewtopic.php?t=1101#p4884)
+ - If the peer sends a close_notify message or closes then TCP connection,
+   then send EOFError to readers and close the SSLContext.
+ - Wait for more encrypted data to arrive.
+
+State management:
+ - `ctx.isopen` is set `false` only when `unsafe_read` or `pump` throws an error.
+ - `close(::TCPSocket)` is called only at the end of the `pump` loop.
+ - `close(::SSLContext)` just calls `ssl_close_notify`.
+"""
+function pump(ctx::SSLContext)
+
+    @assert ctx.isopen
+
+    try
+        while ctx.isopen
+
+            if ssl_get_bytes_avail(ctx) > 0
+                notify(ctx.readytoread)
+            end
+
+            if ssl_check_pending(ctx)
+                n = ssl_read(ctx, C_NULL, 0)
+                if n == MBEDTLS_ERR_SSL_WANT_READ || n >= 0
+                    continue
+                    #FIXME do we spin fast if the TLS buffer fills up?
+                elseif !ctx.close_notify_sent
+                    if n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY
+                        notify_error(ctx, EOFError())
+                    else
+                        notify_error(ctx, MbedException(n))
+                    end
+                end
+                break
+            end
+
+            if !isopen(ctx.bio)
+                if !ctx.close_notify_sent
+                    notify_error(ctx, EOFError())
+                end
+                break
+            end
+
+            wait_for_encrypted_data(ctx)
+            println("pump woke up!")
+            @show ctx.isopen
+            @show ssl_get_bytes_avail(ctx)
+        end
+    catch e
+        ctx.isopen = false
+        Base.notify_error(ctx.readytoread, e)
+    finally
+        close(ctx.bio)
+    end
+end
 
 function handshake(ctx::SSLContext)
+
+    ctx.isopen && throw(ArgumentError("handshake() already done!"))
+
     while true
         n = @lockdata ctx begin
             ccall((:mbedtls_ssl_handshake, libmbedtls), Cint,
@@ -177,50 +253,19 @@ function handshake(ctx::SSLContext)
         if n == 0
             break
         end
-        if n != MBEDTLS_ERR_SSL_WANT_READ
+        if n == MBEDTLS_ERR_SSL_WANT_READ
+            wait_for_encrypted_data(ctx)
+        else
             mbed_err(n)
         end
-        wait(ctx)
     end
+
     ctx.isopen = true
 
     @static if VERSION < v"0.7.0-alpha.0"
-        @schedule while isopen(ctx)
-            # Ensure that libuv is reading data from the socket in case the peer
-            # has sent a close_notify message on an otherwise idle connection.
-            # https://tools.ietf.org/html/rfc5246#section-7.2.1
-            Base.start_reading(ctx.bio)
-            try
-                wait(ctx.bio.readnotify)
-            catch e
-                println("**e in wait(ctx.bio.readnotify) $e")
-                if e isa Base.UVError
-                    # Ignore read errors (UVError ECONNRESET)
-                    # https://github.com/JuliaWeb/MbedTLS.jl/issues/148
-                else
-                    rethrow(e)
-                end
-            end
-            yield()
-        end
+        @schedule pump(ctx)
     else
-        @async while isopen(ctx)
-            # Ensure that libuv is reading data from the socket in case the peer
-            # has sent a close_notify message on an otherwise idle connection.
-            # https://tools.ietf.org/html/rfc5246#section-7.2.1
-            Base.start_reading(ctx.bio)
-            try
-                wait(ctx.bio.readnotify)
-            catch e
-                if e isa Base.IOError
-                    # Ignore read errors (IOError ECONNRESET)
-                    # https://github.com/JuliaWeb/MbedTLS.jl/issues/148
-                else
-                    rethrow(e)
-                end
-            end
-            yield()
-        end
+        @async    pump(ctx)
     end
 
     return
@@ -261,22 +306,26 @@ Base.write(ctx::SSLContext, msg::UInt8) = write(ctx, Ref(msg))
 function Base.unsafe_read(ctx::SSLContext, buf::Ptr{UInt8}, nbytes::UInt; err=true)
     nread::UInt = 0
     while nread < nbytes
-        n = @lockdata ctx begin
-            ccall((:mbedtls_ssl_read, libmbedtls), Cint,
-                   (Ptr{Cvoid}, Ptr{Cvoid}, Csize_t),
-                   ctx.data, buf + nread, nbytes - nread)
+
+        try
+            n = ssl_read(ctx, buf + nread, nbytes - nread)
+        catch e
+            ctx.isopen = false
+            rethrow(e)
         end
+
         if n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || n == 0
             println("**sslclose in unsafe_read")
-            close(ctx)
+            ctx.isopen = false
             err ? throw(EOFError()) : return nread
         elseif n == MBEDTLS_ERR_SSL_WANT_READ
-            wait(ctx)
+            wait_for_decrypted_data(ctx)
         elseif n < 0
+            ctx.isopen = false
             println("**mbed_err in unsafe_read $n")
             mbed_err(n)
         elseif n == 0
-                println("**zero return in unafe_read$n")
+            println("**zero return in unafe_read")
         else
             nread += n
         end
@@ -297,75 +346,23 @@ end
 Base.readavailable(ctx::SSLContext) = read(ctx, bytesavailable(ctx))
 
 function Base.eof(ctx::SSLContext)
-    bytesavailable(ctx)>0 && return false
-
-
-    pending = Int(ccall((:mbedtls_ssl_check_pending, libmbedtls),
-                         Csize_t, (Ptr{Void},), ctx.data))
-    if pending > 0
-        println("****************************************************")
-        @show pending
-        @show _bytesavailable(ctx)
-        println("****************************************************")
+    while ssl_get_bytes_avail(ctx) == 0
+        if !ctx.isopen
+            return true
+        end
+        wait_for_decrypted_data(ctx)
     end
-
-    decrypt_available_bytes(ctx)
-
-    return eof(ctx.bio) && bytesavailable(ctx) == 0
+    return false
 end
 
 function Base.close(ctx::SSLContext)
-    @lockdata ctx begin
-        println("**sslclose in close**")
-        if isopen(ctx.bio)
-            try
-                # This is ugly, but a harmless broken pipe exception will be
-                # thrown if the peer closes the connection without responding
-                ccall((:mbedtls_ssl_close_notify, libmbedtls),
-                       Cint, (Ptr{Cvoid},), ctx.data)
-            catch
-            end
-            close(ctx.bio)
-        end
-        ctx.isopen = false
+    if ctx.isopen
+        ssl_close_notify(ctx)
     end
     nothing
 end
 
-function Base.isopen(ctx::SSLContext)
-
-    if !ctx.isopen || !isopen(ctx.bio)
-        return false
-    end
-
-    decrypt_available_bytes(ctx)
-
-    return ctx.isopen && isopen(ctx.bio)
-end
-
-function decrypt_available_bytes(ctx::SSLContext)
-
-    # Zero-byte read causes MbedTLS to call f_recv (always non-blocking)
-    # and decrypt any bytes that are already in the LibuvStream read buffer.
-    # https://esp32.com/viewtopic.php?t=1101#p4884
-    n = @lockdata ctx begin
-        ccall((:mbedtls_ssl_read, libmbedtls), Cint,
-              (Ptr{Cvoid}, Ptr{Cvoid}, Csize_t),
-                 ctx.data,     C_NULL,       0)
-    end
-    if n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY
-        println("**sslclose in decrypt_available_bytes**")
-        close(ctx)
-    elseif n == MBEDTLS_ERR_SSL_WANT_READ
-        #println("**want read in decrypt_available_bytes**")
-        # ignore
-    elseif n < 0
-            println("**mbed_err in decrypt_available_bytes$n")
-        mbed_err(n)
-    elseif n == 0
-            #println("**zero return in decrypt_available_bytes$n")
-    end
-end
+Base.isopen(ctx::SSLContext) = ctx.isopen
 
 function get_peer_cert(ctx::SSLContext)
     data = ccall((:mbedtls_ssl_get_peer_cert, libmbedtls), Ptr{Cvoid}, (Ptr{Cvoid},), ctx.data)
@@ -387,21 +384,40 @@ function get_ciphersuite(ctx::SSLContext)
 end
 
 @static if isdefined(Base, :bytesavailable)
-    Base.bytesavailable(ctx::SSLContext) = _bytesavailable(ctx)
+    Base.bytesavailable(ctx::SSLContext) = ssl_get_bytes_avail(ctx)
 else
-    Base.nb_available(ctx::SSLContext) = _bytesavailable(ctx)
+    Base.nb_available(ctx::SSLContext) = ssl_get_bytes_avail(ctx)
 end
 
-function _bytesavailable(ctx::SSLContext)
-
-    decrypt_available_bytes(ctx)
-
+function ssl_get_bytes_avail(ctx::SSLContext)::Int
     @lockdata ctx begin
+        return ccall((:mbedtls_ssl_get_bytes_avail, libmbedtls),
+                     Csize_t, (Ptr{Cvoid},), ctx.data)
+    end
+end
 
-        # Now that the bufferd bytes have been processed, find out how many
-        # decrypted bytes are available.
-        return Int(ccall((:mbedtls_ssl_get_bytes_avail, libmbedtls),
-                         Csize_t, (Ptr{Cvoid},), ctx.data))
+function ssl_check_pending(ctx::SSLContext)::Bool =
+    @lockdata ctx begin
+        return ccall((:mbedtls_ssl_check_pending, libmbedtls)
+                     Cint, (Ptr{Cvoid},), ctx.data) > 0
+    end
+end
+
+function ssl_read(ctx::SSLContext, ptr, n)::Int =
+    @lockdata ctx begin
+        return ccall((:mbedtls_ssl_read, libmbedtls), Cint,
+                     (Ptr{Cvoid}, Ptr{Cvoid}, Csize_t),
+                     ctx.data, ptr, n)
+    end
+end
+
+function ssl_close_notify(ctx::SSLContext)
+    if !ctx.close_notify_sent
+        ctx.close_notify_sent = true
+        @lockdata ctx begin
+            return ccall((:mbedtls_ssl_close_notify, libmbedtls),
+                         Cint, (Ptr{Cvoid},), ctx.data)
+        end
     end
 end
 
