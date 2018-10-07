@@ -182,73 +182,7 @@ function set_dbg_level(level)
 end
 
 
-
-# Debug
-
-Base.wait(ctx::SSLContext) = wait(ctx.decrypted_data_ready)
-
-notify_error(ctx::SSLContext, e) = notify(ctx.decrypted_data_ready, e;
-                                          all=true, error=true)
-
-
-"""
-    pump(::SSLContext)
-
-For as long as the SSLContext is open:
- - Notify readers when decrypted data is available.
- - Check the TLS buffers for encrypted data that needs to be processed.
-   (zero-byte ssl_read(), see https://esp32.com/viewtopic.php?t=1101#p4884)
- - If the peer sends a close_notify message or closes then TCP connection,
-   then send EOFError to readers and close the SSLContext.
- - Wait for more encrypted data to arrive.
-
-State management:
- - `ctx.isopen` is set `false` only when `unsafe_read` or `pump` throws an error.
- - `close(::TCPSocket)` is called only at the end of the `pump` loop.
- - `close(::SSLContext)` just calls `ssl_close_notify`.
-"""
-function pump(ctx::SSLContext)
-
-    @assert ctx.isopen
-
-    try
-        while ctx.isopen
-
-            n = ssl_get_bytes_avail(ctx)                                         ; println("ssl_get_bytes_avail(ctx) = $n")
-            if n > 0
-                notify(ctx.decrypted_data_ready)                                 ; println("notify(ctx.decrypted_data_ready)")
-                yield()
-            end
-
-            if (n == 0 && ssl_check_pending(ctx)) || !eof(ctx.bio)
-                n = ssl_read(ctx, C_NULL, 0)                                     ; println("ssl_read(ctx, NULL, 0) = $n $(n == MBEDTLS_ERR_SSL_WANT_READ ? "WANT_READ" : "")")
-                if n == MBEDTLS_ERR_SSL_WANT_READ || n >= 0
-                    continue
-                    #FIXME do we spin fast if the TLS buffer fills up?
-                elseif !ctx.close_notify_sent
-                    if n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY
-                        notify_error(ctx, EOFError())
-                    else
-                        notify_error(ctx, MbedException(n))
-                    end
-                end
-                break
-            end
-
-            if !isopen(ctx.bio);                                                 ; @show isopen(ctx.bio)
-                if !ctx.close_notify_sent
-                    notify_error(ctx, EOFError())
-                end
-                break
-            end
-        end
-    catch e
-        ctx.isopen = false
-        notify_error(ctx, e)
-    finally
-        close(ctx.bio)                                                           ; println("pump done!")
-    end
-end
+# Handshake
 
 function handshake(ctx::SSLContext)
 
@@ -272,13 +206,84 @@ function handshake(ctx::SSLContext)
     ctx.isopen = true
 
     @static if VERSION < v"0.7.0-alpha.0"
-        @schedule pump(ctx)
+        @schedule monitor(ctx)
     else
-        @async    pump(ctx)
+        @async    monitor(ctx)
     end
 
     return
 end
+
+
+# Connection Monitoring
+
+Base.wait(ctx::SSLContext) = wait(ctx.decrypted_data_ready)
+
+notify_error(ctx::SSLContext, e) = notify(ctx.decrypted_data_ready, e;
+                                          all=true, error=true)
+
+
+"""
+    monitor(::SSLContext)
+
+For as long as the SSLContext is open:
+ - Notify readers when decrypted data is available.
+ - Check the TLS buffers for encrypted data that needs to be processed.
+   (zero-byte ssl_read(), see https://esp32.com/viewtopic.php?t=1101#p4884)
+ - If the peer sends a close_notify message or closes then TCP connection,
+   then send EOFError to readers and close the SSLContext.
+ - Wait for more encrypted data to arrive.
+
+State management:
+ - `ctx.isopen` is set `false` only when `unsafe_read` or `monitor` throw error.
+ - `close(::TCPSocket)` is called only at the end of the `monitor` loop.
+ - `close(::SSLContext)` just calls `ssl_close_notify`.
+"""
+function monitor(ctx::SSLContext)
+
+    @assert ctx.isopen
+
+    try
+        while ctx.isopen
+
+            n = ssl_get_bytes_avail(ctx)                                         #; println("ssl_get_bytes_avail(ctx) = $n")
+            if n > 0
+                notify(ctx.decrypted_data_ready, n)                              #; println("notify(ctx.decrypted_data_ready)")
+                yield()
+            end
+
+            if (n == 0 && ssl_check_pending(ctx)) || !eof(ctx.bio)
+                n = ssl_read(ctx, C_NULL, 0)                                     #; println("ssl_read(ctx, NULL, 0) = $n $(n == MBEDTLS_ERR_SSL_WANT_READ ? "WANT_READ" : "")")
+                if n == MBEDTLS_ERR_SSL_WANT_READ || n >= 0
+                    continue
+                    #FIXME do we spin fast if the TLS buffer fills up?
+                elseif !ctx.close_notify_sent
+                    if n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY
+                        notify_error(ctx, EOFError())
+                    else
+                        notify_error(ctx, MbedException(n))
+                    end
+                end
+                break
+            end
+
+            if !isopen(ctx.bio);                                                 #; @show isopen(ctx.bio)
+                if !ctx.close_notify_sent
+                    notify_error(ctx, EOFError())
+                end
+                break
+            end
+        end
+    catch e
+        ctx.isopen = false
+        notify_error(ctx, e)
+    finally
+        close(ctx.bio)                                                           #; println("monitor done!")
+    end
+end
+
+
+# ALPN Configuration
 
 function set_alpn!(conf::SSLConfig, protos)
     conf.alpn_protos = protos
@@ -306,6 +311,9 @@ function Base.unsafe_write(ctx::SSLContext, msg::Ptr{UInt8}, N::UInt)
     return Int(nw)
 end
 
+
+# IO Interface
+
 Base.write(ctx::SSLContext, msg::UInt8) = write(ctx, Ref(msg))
 
 function Base.unsafe_read(ctx::SSLContext, buf::Ptr{UInt8}, nbytes::UInt; err=true)
@@ -317,18 +325,18 @@ function Base.unsafe_read(ctx::SSLContext, buf::Ptr{UInt8}, nbytes::UInt; err=tr
         catch e
             ctx.isopen = false
             rethrow(e)
-        end                                                                      ; println("ssl_read(ctx, buf, $(nbytes - nread)) = $n $(n == MBEDTLS_ERR_SSL_WANT_READ ? "WANT_READ" : "")")
+        end                                                                      #; println("ssl_read(ctx, buf, $(nbytes - nread)) = $n $(n == MBEDTLS_ERR_SSL_WANT_READ ? "WANT_READ" : "")")
 
-        if n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || n == 0                      ; println("**sslclose in unsafe_read")
+        if n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || n == 0                      #; println("**sslclose in unsafe_read")
             ctx.isopen = false
             err ? throw(EOFError()) : return nread
         elseif n == MBEDTLS_ERR_SSL_WANT_READ
             wait(ctx.decrypted_data_ready)
         elseif n < 0
-            ctx.isopen = false                                                   ; println("**mbed_err in unsafe_read $n")
+            ctx.isopen = false                                                   #; println("**mbed_err in unsafe_read $n")
             mbed_err(n)
         elseif n == 0
-                                                                                 ; println("**zero return in unafe_read")
+                                                                                 #; println("**zero return in unafe_read")
         else
             nread += n
         end
@@ -348,13 +356,14 @@ end
 
 Base.readavailable(ctx::SSLContext) = read(ctx, bytesavailable(ctx))
 
-function Base.eof(ctx::SSLContext)                                               ; println("eof(::SSLContext) ... $(ssl_get_bytes_avail(ctx))")
-    while ssl_get_bytes_avail(ctx) == 0
-        if !ctx.isopen                                                           ; println("eof(::SSLContext) -> true")
+function Base.eof(ctx::SSLContext)
+    n = ssl_get_bytes_avail(ctx)                                                 #; println("eof(::SSLContext) ... $n")
+    while n == 0
+        if !ctx.isopen                                                           #; println("eof(::SSLContext) -> true")
             return true
         end
-        wait(ctx.decrypted_data_ready)                                           ; println("eof(::SSLContext) -> wait done: $(ssl_get_bytes_avail(ctx))")
-    end                                                                          ; println("eof(::SSLContext) -> false $(ssl_get_bytes_avail(ctx))")
+        n = wait(ctx.decrypted_data_ready)                                       #; println("eof(::SSLContext) -> wait done: $n")
+    end                                                                          #; println("eof(::SSLContext) -> false $n")
     return false
 end
 
@@ -366,6 +375,9 @@ function Base.close(ctx::SSLContext)
 end
 
 Base.isopen(ctx::SSLContext) = ctx.isopen
+
+
+# C API
 
 function get_peer_cert(ctx::SSLContext)
     data = ccall((:mbedtls_ssl_get_peer_cert, libmbedtls), Ptr{Cvoid}, (Ptr{Cvoid},), ctx.data)
