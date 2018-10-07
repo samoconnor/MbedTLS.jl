@@ -1,3 +1,5 @@
+# Data Structures
+
 mutable struct SSLConfig
     data::Ptr{Cvoid}
     rng
@@ -61,6 +63,9 @@ macro lockdata(ctx, expr)
     end)
 end
 
+
+# Configuration
+
 function config_defaults!(config::SSLConfig; endpoint=MBEDTLS_SSL_IS_CLIENT,
     transport=MBEDTLS_SSL_TRANSPORT_STREAM, preset=MBEDTLS_SSL_PRESET_DEFAULT)
     @err_check ccall((:mbedtls_ssl_config_defaults, libmbedtls), Cint,
@@ -117,6 +122,9 @@ function set_bio!(ssl_ctx::SSLContext, ctx, f_send::Ptr{Cvoid}, f_recv::Ptr{Cvoi
     end
 end
 
+
+# Low level Encrypted IO Callbacks
+
 function f_send(c_ctx, c_msg, sz)
     jl_ctx = unsafe_pointer_to_objref(c_ctx)
     return Cint(unsafe_write(jl_ctx, c_msg, sz))
@@ -139,6 +147,9 @@ function set_bio!(ssl_ctx::SSLContext, jl_ctx::T) where {T<:IO}
     set_bio!(ssl_ctx, pointer_from_objref(ssl_ctx.bio), c_send[], c_recv[])
     nothing
 end
+
+
+# Debug
 
 function dbg!(conf::SSLConfig, f::Ptr{Cvoid}, p)
     ccall((:mbedtls_ssl_conf_dbg, libmbedtls), Cvoid,
@@ -170,6 +181,9 @@ function set_dbg_level(level)
     nothing
 end
 
+
+
+# Debug
 
 Base.wait(ctx::SSLContext) = wait(ctx.decrypted_data_ready)
 
@@ -333,13 +347,13 @@ end
 
 Base.readavailable(ctx::SSLContext) = read(ctx, bytesavailable(ctx))
 
-function Base.eof(ctx::SSLContext)
+function Base.eof(ctx::SSLContext)                                               ; println("eof(::SSLContext) ... $(ssl_get_bytes_avail(ctx))")
     while ssl_get_bytes_avail(ctx) == 0
-        if !ctx.isopen
+        if !ctx.isopen                                                           ; println("eof(::SSLContext) -> true")
             return true
         end
         wait(ctx.decrypted_data_ready)
-    end
+    end                                                                          ; println("eof(::SSLContext) -> false $(ssl_get_bytes_avail(ctx))")
     return false
 end
 
