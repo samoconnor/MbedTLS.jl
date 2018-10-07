@@ -200,13 +200,15 @@ function pump(ctx::SSLContext)
     try
         while ctx.isopen
 
+            @show :top
             @show ssl_get_bytes_avail(ctx)
-            if ssl_get_bytes_avail(ctx) > 0
+            n = ssl_get_bytes_avail(ctx)
+            if n > 0
                 notify(ctx.decrypted_data_ready)
             end
 
             @show ssl_check_pending(ctx)
-            if ssl_check_pending(ctx) || !eof(ctx.bio)
+            if (n == 0 && ssl_check_pending(ctx)) || !eof(ctx.bio)
                 n = ssl_read(ctx, C_NULL, 0)
                 @show n
                 @show n == MBEDTLS_ERR_SSL_WANT_READ
@@ -354,7 +356,7 @@ function Base.eof(ctx::SSLContext)
 end
 
 function Base.close(ctx::SSLContext)
-    if ctx.isopen
+    if ctx.isopen && isopen(ctx.bio)
         ssl_close_notify(ctx)
     end
     nothing
