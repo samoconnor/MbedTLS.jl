@@ -124,9 +124,9 @@ end
 
 # Debug
 
-using Dates
 
-if DEBUG_LEVEL > 0
+@static if DEBUG_LEVEL > 0
+    using Dates
     taskid(t=current_task()) = string(hash(t) & 0xffff, base=16, pad=4)
     debug_header() = string("MBTLS: ", rpad(Dates.now(), 24), taskid(), " ")
 end
