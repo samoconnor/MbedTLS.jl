@@ -26,19 +26,19 @@ Base.show(io::IO, c::SSLConfig) = print(io, "MbedTLS.SSLConfig()")
 mutable struct SSLContext <: IO
     data::Ptr{Cvoid}
     datalock::ReentrantLock
-    decrypted_data_ready::Condition
     config::SSLConfig
     isopen::Bool
     close_notify_sent::Bool
+    decrypted_data_ready::Condition
     bio
 
     function SSLContext()
         ctx = new()
         ctx.data = Libc.malloc(1000)  # 488
         ctx.datalock = ReentrantLock()
-        ctx.decrypted_data_ready = Condition()
         ctx.isopen = false
         ctx.close_notify_sent = false
+        ctx.decrypted_data_ready = Condition()
         ccall((:mbedtls_ssl_init, libmbedtls), Cvoid, (Ptr{Cvoid},), ctx.data)
         @compat finalizer(ctx->begin
             ccall((:mbedtls_ssl_free, libmbedtls), Cvoid, (Ptr{Cvoid},), ctx.data)
@@ -368,13 +368,14 @@ function Base.eof(ctx::SSLContext)
 end
 
 function Base.close(ctx::SSLContext)
-    if ctx.isopen && isopen(ctx.bio)
+    if !ctx.close_notify_sent && ctx.isopen && isopen(ctx.bio)
+        ctx.close_notify_sent = true
         ssl_close_notify(ctx)
     end
     nothing
 end
 
-Base.isopen(ctx::SSLContext) = ctx.isopen
+Base.isopen(ctx::SSLContext) = ctx.isopen && !ctx.close_notify_sent
 
 
 # C API
@@ -435,12 +436,9 @@ function ssl_write(ctx::SSLContext, ptr, n)::Int
 end
 
 function ssl_close_notify(ctx::SSLContext)
-    if !ctx.close_notify_sent
-        ctx.close_notify_sent = true
-        @lockdata ctx begin
-            return ccall((:mbedtls_ssl_close_notify, libmbedtls),
-                         Cint, (Ptr{Cvoid},), ctx.data)
-        end
+    @lockdata ctx begin
+        return ccall((:mbedtls_ssl_close_notify, libmbedtls),
+                     Cint, (Ptr{Cvoid},), ctx.data)
     end
 end
 
