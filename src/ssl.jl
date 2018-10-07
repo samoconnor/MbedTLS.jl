@@ -217,6 +217,7 @@ function pump(ctx::SSLContext)
             n = ssl_get_bytes_avail(ctx)                                         ; println("ssl_get_bytes_avail(ctx) = $n")
             if n > 0
                 notify(ctx.decrypted_data_ready)                                 ; println("notify(ctx.decrypted_data_ready)")
+                yield()
             end
 
             if (n == 0 && ssl_check_pending(ctx)) || !eof(ctx.bio)
