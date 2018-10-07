@@ -50,9 +50,6 @@ end
 
 macro lockdata(ctx, expr)
     esc(quote
-                                                                                 if islocked($ctx.datalock)
-                                                                                    println("tls lock wait...")
-                                                                                 end
         lock($ctx.datalock)
         @assert $ctx.datalock.reentrancy_cnt == 1
         try
@@ -221,23 +218,20 @@ end
 
 # Connection Monitoring
 
-notify_error(ctx::SSLContext, e) = notify(ctx.decrypted_data_ready, e;
-                                          all=true, error=true)
-
-
 """
     monitor(::SSLContext)
 
 For as long as the SSLContext is open:
- - Notify readers when decrypted data is available.
+ - Notify readers (blocked in eof()) when decrypted data is available.
  - Check the TLS buffers for encrypted data that needs to be processed.
    (zero-byte ssl_read(), see https://esp32.com/viewtopic.php?t=1101#p4884)
  - If the peer sends a close_notify message or closes then TCP connection,
-   then send EOFError to readers and close the SSLContext.
+   then notify readers and close the SSLContext.
  - Wait for more encrypted data to arrive.
 
 State management:
- - `ctx.isopen` is set `false` only when `unsafe_read` or `monitor` throw error.
+ - `ctx.isopen` is set `false` when `unsafe_read` or `monitor` throw an error
+    or when the `monitor` determines that the peer has closed the connection.
  - `close(::TCPSocket)` is called only at the end of the `monitor` loop.
  - `close(::SSLContext)` just calls `ssl_close_notify`.
 """
@@ -250,7 +244,7 @@ function monitor(ctx::SSLContext)
 
             n = ssl_get_bytes_avail(ctx)
             if n > 0
-                notify(ctx.decrypted_data_ready, n)
+                notify(ctx.decrypted_data_ready)
                 yield()
             end
 
@@ -259,23 +253,20 @@ function monitor(ctx::SSLContext)
                 if n == MBEDTLS_ERR_SSL_WANT_READ || n >= 0
                     continue
                     #FIXME do we spin fast if the TLS buffer fills up?
-                elseif !ctx.close_notify_sent
+                else
                     if n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY
-                        println("EOFError in monitor, MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY")
-                        notify_error(ctx, EOFError())
+                        ctx.isopen = false
+                        notify(ctx.decrypted_data_ready0)
                     else
                         notify_error(ctx, MbedException(n))
+                        break
                     end
                 end
-                break
             end
 
             if !isopen(ctx.bio);
-                if !ctx.close_notify_sent
-                    println("EOFError in monitor, ctx.bio closed")
-                    notify_error(ctx, EOFError())
-                end
-                break
+                ctx.isopen = false
+                notify(ctx.decrypted_data_ready)
             end
         end
     catch e
@@ -358,12 +349,11 @@ end
 Base.readavailable(ctx::SSLContext) = read(ctx, bytesavailable(ctx))
 
 function Base.eof(ctx::SSLContext)
-    n = ssl_get_bytes_avail(ctx)
-    while n == 0
+    while ssl_get_bytes_avail(ctx) == 0
         if !ctx.isopen
             return true
         end
-        n = wait(ctx.decrypted_data_ready)
+        wait(ctx.decrypted_data_ready)
     end
     return false
 end
