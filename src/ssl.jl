@@ -305,7 +305,7 @@ function ssl_unsafe_read(ctx::SSLContext, buf::Ptr{UInt8}, nbytes::UInt)
                n == MBEDTLS_ERR_NET_CONN_RESET
                 ssl_abandon(ctx)
                 @assert ssl_get_bytes_avail(ctx) == 0   #FIXME remove this
-                @assert ssl_check_pending(ctx) == flase #FIXME remove this
+                @assert ssl_check_pending(ctx) == false #FIXME remove this
                 return nread
             elseif n == MBEDTLS_ERR_SSL_WANT_READ
                 ctx.bytesavailable = 0                                          ;@😬 "ssl_read ⌛️ $nread"
