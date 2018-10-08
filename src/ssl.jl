@@ -335,7 +335,15 @@ end
 
 # Receiving Encrypted Data
 
-wait_for_encrypted_data(ctx) = (eof(ctx.bio); nothing)
+function wait_for_encrypted_data(ctx)
+    try
+        eof(ctx.bio)
+    catch e
+        if !(e isa Base.UVError) || e.code != Base.UV_ECONNRESET
+            rethrow(e)
+        end
+    end
+end
 
 
 """
